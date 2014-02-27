@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 #
 # Copyright (C) 2013 Stanislav Golovanov <stgolovanov@gmail.com>
-#                    Google Inc.
+#                    Strahinja Val Markovic  <val@markovic.io>
 #
 # YouCompleteMe is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -16,25 +16,26 @@
 # You should have received a copy of the GNU General Public License
 # along with YouCompleteMe.  If not, see <http://www.gnu.org/licenses/>.
 
+import vim
 import os
 import re
-from collections import defaultdict
 
-from ycm.completers.completer import Completer
+from ycm import vimsupport
+from ycm.completers.threaded_completer import ThreadedCompleter
 from ycm.completers.cpp.clang_completer import InCFamilyFile
 from ycm.completers.cpp.flags import Flags
-from ycm.utils import ToUtf8IfNeeded
-from ycm.server import responses
 
-EXTRA_INFO_MAP = { 1 : '[File]', 2 : '[Dir]', 3 : '[File&Dir]' }
+USE_WORKING_DIR = vimsupport.GetBoolValue(
+  'g:ycm_filepath_completion_use_working_dir' )
 
-class FilenameCompleter( Completer ):
+
+class FilenameCompleter( ThreadedCompleter ):
   """
   General completer that provides filename and filepath completions.
   """
 
-  def __init__( self, user_options ):
-    super( FilenameCompleter, self ).__init__( user_options )
+  def __init__( self ):
+    super( FilenameCompleter, self ).__init__()
     self._flags = Flags()
 
     self._path_regex = re.compile( """
@@ -56,35 +57,25 @@ class FilenameCompleter( Completer ):
     self._include_regex = re.compile( include_regex_common )
 
 
-  def AtIncludeStatementStart( self, request_data ):
-    start_column = request_data[ 'start_column' ]
-    current_line = request_data[ 'line_value' ]
-    filepath = ToUtf8IfNeeded( request_data[ 'filepath' ] )
-    filetypes = request_data[ 'file_data' ][ filepath ][ 'filetypes' ]
-    return ( InCFamilyFile( filetypes ) and
+  def AtIncludeStatementStart( self, start_column ):
+    return ( InCFamilyFile() and
              self._include_start_regex.match(
-               current_line[ :start_column ] ) )
+               vim.current.line[ :start_column ] ) )
 
 
-  def ShouldUseNowInner( self, request_data ):
-    start_column = request_data[ 'start_column' ]
-    current_line = request_data[ 'line_value' ]
-    return ( start_column and ( current_line[ start_column - 1 ] == '/' or
-             self.AtIncludeStatementStart( request_data ) ) )
+  def ShouldUseNowInner( self, start_column ):
+    return ( start_column and ( vim.current.line[ start_column - 1 ] == '/' or
+             self.AtIncludeStatementStart( start_column ) ) )
 
 
   def SupportedFiletypes( self ):
     return []
 
 
-  def ComputeCandidatesInner( self, request_data ):
-    current_line = request_data[ 'line_value' ]
-    start_column = request_data[ 'start_column' ]
-    filepath = ToUtf8IfNeeded( request_data[ 'filepath' ] )
-    filetypes = request_data[ 'file_data' ][ filepath ][ 'filetypes' ]
-    line = current_line[ :start_column ]
+  def ComputeCandidates( self, unused_query, start_column ):
+    line = vim.current.line[ :start_column ]
 
-    if InCFamilyFile( filetypes ):
+    if InCFamilyFile():
       include_match = self._include_regex.search( line )
       if include_match:
         path_dir = line[ include_match.end(): ]
@@ -92,26 +83,20 @@ class FilenameCompleter( Completer ):
         # http://gcc.gnu.org/onlinedocs/cpp/Include-Syntax.html
         include_current_file_dir = '<' not in include_match.group()
         return _GenerateCandidatesForPaths(
-          self.GetPathsIncludeCase( path_dir,
-                                    include_current_file_dir,
-                                    filepath ) )
+          self.GetPathsIncludeCase( path_dir, include_current_file_dir ) )
 
     path_match = self._path_regex.search( line )
     path_dir = os.path.expanduser( path_match.group() ) if path_match else ''
 
-    return _GenerateCandidatesForPaths(
-      _GetPathsStandardCase(
-        path_dir,
-        self.user_options[ 'filepath_completion_use_working_dir' ],
-        filepath ) )
+    return _GenerateCandidatesForPaths( _GetPathsStandardCase( path_dir ) )
 
 
-  def GetPathsIncludeCase( self, path_dir, include_current_file_dir, filepath ):
+  def GetPathsIncludeCase( self, path_dir, include_current_file_dir ):
     paths = []
-    include_paths = self._flags.UserIncludePaths( filepath )
+    include_paths = self._flags.UserIncludePaths( vim.current.buffer.name )
 
     if include_current_file_dir:
-      include_paths.append( os.path.dirname( filepath ) )
+      include_paths.append( os.path.dirname( vim.current.buffer.name ) )
 
     for include_path in include_paths:
       try:
@@ -125,9 +110,9 @@ class FilenameCompleter( Completer ):
     return sorted( set( paths ) )
 
 
-def _GetPathsStandardCase( path_dir, use_working_dir, filepath ):
-  if not use_working_dir and not path_dir.startswith( '/' ):
-    path_dir = os.path.join( os.path.dirname( filepath ),
+def _GetPathsStandardCase( path_dir ):
+  if not USE_WORKING_DIR and not path_dir.startswith( '/' ):
+    path_dir = os.path.join( os.path.dirname( vim.current.buffer.name ),
                              path_dir )
 
   try:
@@ -140,20 +125,18 @@ def _GetPathsStandardCase( path_dir, use_working_dir, filepath ):
 
 
 def _GenerateCandidatesForPaths( absolute_paths ):
-  extra_info = defaultdict(int)
-  basenames = []
+  seen_basenames = set()
+  completion_dicts = []
+
   for absolute_path in absolute_paths:
     basename = os.path.basename( absolute_path )
-    if extra_info[ basename ] == 0:
-      basenames.append( basename )
-    is_dir = os.path.isdir( absolute_path )
-    extra_info[ basename ] |= ( 2 if is_dir else 1 )
+    if basename in seen_basenames:
+      continue
+    seen_basenames.add( basename )
 
-  completion_dicts = []
-  # Keep original ordering
-  for basename in basenames:
-    completion_dicts.append(
-      responses.BuildCompletionData( basename,
-                                     EXTRA_INFO_MAP[ extra_info[ basename ] ] ) )
+    is_dir = os.path.isdir( absolute_path )
+    completion_dicts.append( { 'word': basename,
+                               'dup': 1,
+                               'menu': '[Dir]' if is_dir else '[File]' } )
 
   return completion_dicts

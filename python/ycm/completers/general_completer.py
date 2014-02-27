@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Copyright (C) 2011, 2012  Google Inc.
+# Copyright (C) 2011, 2012  Strahinja Val Markovic  <val@markovic.io>
 #
 # This file is part of YouCompleteMe.
 #
@@ -29,8 +29,8 @@ class GeneralCompleter( Completer ):
   Subclass Completer directly.
 
   """
-  def __init__( self, user_options ):
-    super( GeneralCompleter, self ).__init__( user_options )
+  def __init__( self ):
+    super( GeneralCompleter, self ).__init__()
 
 
   def SupportedFiletypes( self ):
